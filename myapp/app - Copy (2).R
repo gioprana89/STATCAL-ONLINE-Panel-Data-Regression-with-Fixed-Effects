@@ -5,12 +5,12 @@
 # Required packages:
 # install.packages(c(
 #   "shiny", "shinydashboard", "DT", "readxl", "dplyr", "plm",
-#   "lmtest", "sandwich", "openxlsx", "ggplot2", "shinycssloaders", "scales"
+#   "lmtest", "sandwich", "openxlsx", "ggplot2", "shinycssloaders"
 # ))
 
 required_packages <- c(
   "shiny", "shinydashboard", "DT", "readxl", "dplyr", "plm",
-  "lmtest", "sandwich", "openxlsx", "ggplot2", "shinycssloaders", "scales"
+  "lmtest", "sandwich", "openxlsx", "ggplot2", "shinycssloaders"
 )
 
 missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
@@ -41,7 +41,7 @@ library(scales)
 
 APP_NAME <- "STATCAL ONLINE"
 APP_TITLE <- "STATCAL ONLINE Panel Data Regression with Fixed Effects"
-APP_UPDATED <- "Last updated on July 6, 2026"
+APP_UPDATED <- "Last updated on July 2, 2026"
 WEBSITE_URL <- "https://statcal.com/"
 STATCAL_ONLINE_URL <- "https://statcal.com/statcal%20online.html"
 TRAINING_DATA_URL <- "https://drive.google.com/drive/folders/1s273Ad5FUElhzd5G16jWSBxbOtforzRR?usp=sharing"
@@ -630,147 +630,10 @@ make_intercept_fe_table <- function(model, label_df, effect_spec = effect_spec_s
 }
 
 
-safe_cor_r_squared <- function(y, yhat) {
-  y <- as.numeric(y)
-  yhat <- as.numeric(yhat)
-  ok <- is.finite(y) & is.finite(yhat)
-  if (sum(ok) < 2) return(NA_real_)
-  y_ok <- y[ok]
-  yhat_ok <- yhat[ok]
-  if (stats::sd(y_ok) == 0 || stats::sd(yhat_ok) == 0) return(NA_real_)
-  r <- suppressWarnings(stats::cor(y_ok, yhat_ok))
-  if (!is.finite(r)) return(NA_real_)
-  as.numeric(r^2)
-}
-
-within_transform_oneway <- function(v, group) {
-  v <- as.numeric(v)
-  group <- as.factor(group)
-  v - ave(v, group, FUN = function(z) mean(z, na.rm = TRUE))
-}
-
-within_transform_twoway <- function(v, entity, time) {
-  v <- as.numeric(v)
-  entity <- as.factor(entity)
-  time <- as.factor(time)
-  v -
-    ave(v, entity, FUN = function(z) mean(z, na.rm = TRUE)) -
-    ave(v, time, FUN = function(z) mean(z, na.rm = TRUE)) +
-    mean(v, na.rm = TRUE)
-}
-
-make_stata_style_r_squared <- function(fem, model_df, effect_spec = effect_spec_settings()) {
-  df <- as.data.frame(model_df)
-  coef_vec <- tryCatch(stats::coef(fem), error = function(e) NULL)
-  if (is.null(coef_vec) || length(coef_vec) == 0) {
-    return(list(within = NA_real_, between = NA_real_, overall = NA_real_))
-  }
-  
-  x_names <- names(coef_vec)[grepl("^\\.X", names(coef_vec))]
-  if (length(x_names) == 0 || !all(x_names %in% names(df))) {
-    return(list(within = NA_real_, between = NA_real_, overall = NA_real_))
-  }
-  
-  y <- as.numeric(df$.Y)
-  x_mat <- as.matrix(df[, x_names, drop = FALSE])
-  beta <- as.numeric(coef_vec[x_names])
-  xb <- as.numeric(x_mat %*% beta)
-  
-  if (effect_spec$cross_section_fixed && effect_spec$period_fixed) {
-    y_within <- within_transform_twoway(y, df$.Entity, df$.Time)
-    xb_within <- within_transform_twoway(xb, df$.Entity, df$.Time)
-    between_df <- stats::aggregate(
-      cbind(.Y = y, .XB = xb),
-      by = list(Entity = df$.Entity),
-      FUN = function(z) mean(z, na.rm = TRUE)
-    )
-  } else if (effect_spec$period_fixed && !effect_spec$cross_section_fixed) {
-    y_within <- within_transform_oneway(y, df$.Time)
-    xb_within <- within_transform_oneway(xb, df$.Time)
-    between_df <- stats::aggregate(
-      cbind(.Y = y, .XB = xb),
-      by = list(Time = df$.Time),
-      FUN = function(z) mean(z, na.rm = TRUE)
-    )
-  } else {
-    # For cross-section fixed effects, this follows the usual STATA xtreg, fe logic:
-    # within = entity-demeaned correlation; between = entity-mean correlation;
-    # overall = raw dependent variable versus fitted values from the slope coefficients.
-    y_within <- within_transform_oneway(y, df$.Entity)
-    xb_within <- within_transform_oneway(xb, df$.Entity)
-    between_df <- stats::aggregate(
-      cbind(.Y = y, .XB = xb),
-      by = list(Entity = df$.Entity),
-      FUN = function(z) mean(z, na.rm = TRUE)
-    )
-  }
-  
-  list(
-    within = safe_cor_r_squared(y_within, xb_within),
-    between = safe_cor_r_squared(between_df$.Y, between_df$.XB),
-    overall = safe_cor_r_squared(y, xb)
-  )
-}
-
-make_simultaneous_f_test <- function(model) {
-  coef_vec <- tryCatch(stats::coef(model), error = function(e) NULL)
-  if (is.null(coef_vec) || length(coef_vec) == 0) {
-    return(list(statistic = NA_real_, df1 = NA_real_, df2 = NA_real_, p.value = NA_real_))
-  }
-  
-  # Test all independent-variable slope coefficients simultaneously.
-  # Fixed-effect intercept/dummy components and the common constant C are not included.
-  x_names <- names(coef_vec)[grepl("^\\.X", names(coef_vec))]
-  if (length(x_names) == 0) {
-    return(list(statistic = NA_real_, df1 = NA_real_, df2 = NA_real_, p.value = NA_real_))
-  }
-  
-  vcov_mat <- tryCatch(stats::vcov(model), error = function(e) NULL)
-  if (is.null(vcov_mat) || !all(x_names %in% rownames(vcov_mat)) || !all(x_names %in% colnames(vcov_mat))) {
-    return(list(statistic = NA_real_, df1 = NA_real_, df2 = NA_real_, p.value = NA_real_))
-  }
-  
-  beta <- matrix(as.numeric(coef_vec[x_names]), ncol = 1)
-  vc <- as.matrix(vcov_mat[x_names, x_names, drop = FALSE])
-  inv_vc_beta <- tryCatch(
-    solve(vc, beta),
-    error = function(e) tryCatch(qr.solve(vc, beta), error = function(e2) NULL)
-  )
-  
-  if (is.null(inv_vc_beta)) {
-    return(list(statistic = NA_real_, df1 = NA_real_, df2 = NA_real_, p.value = NA_real_))
-  }
-  
-  df1 <- length(x_names)
-  df2 <- tryCatch(stats::df.residual(model), error = function(e) NA_real_)
-  f_stat <- as.numeric(t(beta) %*% inv_vc_beta / df1)
-  p_value <- if (!is.na(df2) && is.finite(df2) && df2 > 0 && is.finite(f_stat)) {
-    stats::pf(f_stat, df1 = df1, df2 = df2, lower.tail = FALSE)
-  } else {
-    NA_real_
-  }
-  
-  list(statistic = f_stat, df1 = df1, df2 = df2, p.value = p_value)
-}
-
-make_model_fit_table <- function(fem, pooling, model_df, lsdv_common = NULL, effect_spec = effect_spec_settings()) {
+make_model_fit_table <- function(fem, pooling, effect_spec = effect_spec_settings()) {
   smry <- summary(fem)
-  r2_summary <- tryCatch(as.numeric(smry$r.squared["rsq"]), error = function(e) NA_real_)
+  r2 <- tryCatch(as.numeric(smry$r.squared["rsq"]), error = function(e) NA_real_)
   adj_r2 <- tryCatch(as.numeric(smry$r.squared["adjrsq"]), error = function(e) NA_real_)
-  stata_r2 <- make_stata_style_r_squared(fem, model_df, effect_spec)
-  simultaneous_f <- make_simultaneous_f_test(fem)
-  
-  lsdv_r2 <- tryCatch(as.numeric(summary(lsdv_common)$r.squared), error = function(e) NA_real_)
-  lsdv_adj_r2 <- tryCatch(as.numeric(summary(lsdv_common)$adj.r.squared), error = function(e) NA_real_)
-  lsdv_f_stat <- tryCatch(as.numeric(summary(lsdv_common)$fstatistic["value"]), error = function(e) NA_real_)
-  lsdv_f_df1 <- tryCatch(as.numeric(summary(lsdv_common)$fstatistic["numdf"]), error = function(e) NA_real_)
-  lsdv_f_df2 <- tryCatch(as.numeric(summary(lsdv_common)$fstatistic["dendf"]), error = function(e) NA_real_)
-  lsdv_f_p <- if (!is.na(lsdv_f_stat) && !is.na(lsdv_f_df1) && !is.na(lsdv_f_df2)) {
-    stats::pf(lsdv_f_stat, df1 = lsdv_f_df1, df2 = lsdv_f_df2, lower.tail = FALSE)
-  } else {
-    NA_real_
-  }
-  
   ftest <- if (effect_spec$plm_model == "pooling") {
     NULL
   } else {
@@ -783,63 +646,20 @@ make_model_fit_table <- function(fem, pooling, model_df, lsdv_common = NULL, eff
       "Effect specification",
       "Cross-section effect",
       "Period effect",
-      "R-squared within (STATA-style)",
-      "R-squared between (STATA-style)",
-      "R-squared overall (STATA-style)",
-      "R-squared from plm summary",
-      "Adjusted R-squared from plm summary",
-      "Simultaneous F-test for independent variables: F statistic",
-      "Simultaneous F-test for independent variables: numerator df",
-      "Simultaneous F-test for independent variables: denominator df",
-      "Simultaneous F-test for independent variables: p-value",
-      "LSDV / EViews-style R-squared",
-      "LSDV / EViews-style adjusted R-squared",
-      "LSDV / EViews-style F statistic",
-      "LSDV / EViews-style F p-value",
-      "F-test for fixed effects vs pooled OLS: F statistic",
-      "F-test for fixed effects vs pooled OLS: p-value"
+      "Within R-squared",
+      "Adjusted R-squared",
+      "F-test for fixed effects: F statistic",
+      "F-test for fixed effects: p-value"
     ),
     Value = c(
       effect_spec$model_type,
       effect_spec$label,
       ifelse(effect_spec$cross_section_fixed, "Fixed", "None"),
       ifelse(effect_spec$period_fixed, "Fixed", "None"),
-      round(stata_r2$within, 6),
-      round(stata_r2$between, 6),
-      round(stata_r2$overall, 6),
-      round(r2_summary, 6),
+      round(r2, 6),
       round(adj_r2, 6),
-      round(simultaneous_f$statistic, 6),
-      simultaneous_f$df1,
-      simultaneous_f$df2,
-      format_p_value(simultaneous_f$p.value),
-      round(lsdv_r2, 6),
-      round(lsdv_adj_r2, 6),
-      round(lsdv_f_stat, 6),
-      format_p_value(lsdv_f_p),
       ifelse(is.null(ftest), NA, round(as.numeric(ftest$statistic), 6)),
       ifelse(is.null(ftest), NA, format_p_value(as.numeric(ftest$p.value)))
-    ),
-    Description = c(
-      "Estimated panel data model type.",
-      "Selected fixed-effect structure.",
-      "Cross-section/entity fixed effect setting.",
-      "Period/time fixed effect setting.",
-      "Squared correlation after the relevant within transformation. For cross-section FE, this follows entity-demeaned STATA-style R-squared within.",
-      "Squared correlation between group means of the dependent variable and fitted values. For cross-section FE, this uses entity means.",
-      "Squared correlation between the original dependent variable and fitted values from the slope coefficients.",
-      "R-squared reported by summary(plm).",
-      "Adjusted R-squared reported by summary(plm).",
-      "Wald-type F statistic testing whether all slope coefficients of the independent variables are jointly equal to zero. This is comparable to the F statistic printed in STATA xtreg, fe above the coefficient table.",
-      "Number of slope coefficients tested simultaneously.",
-      "Residual degrees of freedom of the estimated model.",
-      "Probability value of the simultaneous F-test. If p-value < 0.05, the independent variables jointly have a significant effect.",
-      "R-squared from the equivalent least-squares dummy variable model. This is comparable to the main R-squared displayed by EViews for cross-section fixed effects.",
-      "Adjusted R-squared from the equivalent least-squares dummy variable model.",
-      "Overall F statistic from the equivalent LSDV model. This is comparable to the F-statistic displayed by EViews and includes the fixed-effect dummy structure.",
-      "Probability value for the LSDV / EViews-style F statistic.",
-      "F statistic comparing the selected fixed-effect model with pooled OLS. This is comparable to the STATA test that all u_i = 0.",
-      "Probability value for the fixed-effect specification test."
     ),
     stringsAsFactors = FALSE
   )
@@ -947,7 +767,7 @@ ui <- dashboardPage(
           div(class = "statcal-title", APP_TITLE),
           div(class = "statcal-subtitle", APP_UPDATED),
           tags$p(class = "statcal-note",
-                 "This R Shiny application is designed to estimate panel data regression models with flexible fixed effect specifications. Users can select cross-section effects, period effects, or two-way effects to account for unobserved heterogeneity across entities and/or time periods. The application also provides coefficient estimates, robust standard errors, fixed effect intercepts, STATA-style R-squared within/between/overall, simultaneous F-test statistics, model diagnostics, automatic interpretation, and exportable results."),
+                 "This R Shiny application is designed to estimate panel data regression models with flexible fixed effect specifications. Users can select cross-section effects, period effects, or two-way effects to account for unobserved heterogeneity across entities and/or time periods. The application also provides coefficient estimates, robust standard errors, fixed effect intercepts, model diagnostics, automatic interpretation, and exportable results."),
           tags$p(tags$b("Website: "), tags$a(href = WEBSITE_URL, target = "_blank", WEBSITE_URL), tags$br(),
                  tags$b("STATCAL ONLINE Page: "), tags$a(href = STATCAL_ONLINE_URL, target = "_blank", STATCAL_ONLINE_URL), tags$br(),
                  tags$b("Training Data: "), tags$a(href = TRAINING_DATA_URL, target = "_blank", "Open Google Drive Folder"))
@@ -1019,8 +839,7 @@ ui <- dashboardPage(
                      shinycssloaders::withSpinner(DTOutput("constant_c_table")))
                ),
                fluidRow(
-                 box(width = 12, title = "Model Fit, STATA-style R-squared, and F-test", status = "success", solidHeader = TRUE,
-                     tags$p("This table includes R-squared within, R-squared between, R-squared overall, and the simultaneous F-test for independent variables, following a STATA-like panel regression output style."),
+                 box(width = 12, title = "Model Fit and Fixed Effect Test", status = "success", solidHeader = TRUE,
                      shinycssloaders::withSpinner(DTOutput("model_fit_table")))
                ),
                fluidRow(
@@ -1057,7 +876,7 @@ ui <- dashboardPage(
                br(),
                fluidRow(
                  box(width = 6, title = "Export Tables to Excel", status = "success", solidHeader = TRUE,
-                     tags$p("The Excel workbook contains data preview, variable mapping, panel structure, FEM coefficients, robust standard error, STATA-style R-squared, simultaneous F-test, model fit, and Intercept Fixed Effect."),
+                     tags$p("The Excel workbook contains data preview, variable mapping, panel structure, FEM coefficients, robust standard error, model fit, and Intercept Fixed Effect."),
                      downloadButton("download_excel", "Download FEM Results Excel")),
                  box(width = 6, title = "Export Intercept Fixed Effect", status = "success", solidHeader = TRUE,
                      tags$p("Download only the Intercept Fixed Effect table as CSV."),
@@ -1271,7 +1090,7 @@ server <- function(input, output, session) {
   
   model_fit_table_data <- reactive({
     mr <- model_result()
-    make_model_fit_table(mr$fem, mr$pooling, mr$lsdv_data, mr$lsdv_common, mr$effect_spec)
+    make_model_fit_table(mr$fem, mr$pooling, mr$effect_spec)
   })
   
   panel_structure_data <- reactive({
@@ -1342,8 +1161,6 @@ server <- function(input, output, session) {
     mr <- model_result()
     cat("Effect specification:", mr$effect_spec$label, "\n\n")
     print(summary(mr$fem))
-    cat("\n\nModel Fit, STATA-style R-squared, and F-test:\n")
-    print(model_fit_table_data())
     cat("\n\nCommon Constant C / EViews-style Intercept:\n")
     print(constant_c_table_data())
     cat("\n\nFixed Effect Intercepts:\n")
